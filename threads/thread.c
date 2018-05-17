@@ -11,6 +11,8 @@
 #include "threads/switch.h"
 #include "threads/synch.h"
 #include "threads/vaddr.h"
+#include "devices/timer.h"
+
 #ifdef USERPROG
 #include "userprog/process.h"
 #endif
@@ -54,6 +56,8 @@ static long long user_ticks;    /* # of timer ticks in user programs. */
 #define TIME_SLICE 4            /* # of timer ticks to give each thread. */
 static unsigned thread_ticks;   /* # of timer ticks since last yield. */
 
+static FPReal load_avg; 
+
 /* If false (default), use round-robin scheduler.
    If true, use multi-level feedback queue scheduler.
    Controlled by kernel command-line option "-o mlfqs". */
@@ -93,6 +97,8 @@ thread_init (void)
   list_init (&ready_list);
   list_init (&all_list);
 
+  load_avg=0;
+
   /* Set up a thread structure for the running thread. */
   initial_thread = running_thread ();
   init_thread (initial_thread, "main", PRI_DEFAULT);
@@ -117,13 +123,74 @@ thread_start (void)
   sema_down (&idle_started);
 }
 
+/*
+Function to order thread by priorites
+*/
+static bool is_smaller_priority(const struct list_elem *A, const struct list_elem *B, void * aux){
+  struct thread *ta=list_entry(A,struct thread,elem);
+  struct thread *tb=list_entry(B,struct thread,elem);
+
+  return ta->priority<tb->priority;
+}
+
+/*
+Function to update recent CPU
+*/
+
+void update_recent_cpu(struct thread *t, void *aux){
+  if (t==idle_thread)
+    return;
+
+    FPReal coef=FPR_DIV_FPR(FPR_MUL_INT(load_avg,2),FPR_ADD_INT(FPR_MUL_INT(load_avg,2),1));
+    t->recent_cpu=FPR_ADD_INT(FPR_MUL_FPR(coef,t->recent_cpu),t->nice);
+
+}
+
+void recalc_priorities(struct thread *t, void *aux){
+  if (t==idle_thread)
+    return;
+
+  thread_recalc_priority(t);
+}
+
 /* Called by the timer interrupt handler at each timer tick.
    Thus, this function runs in an external interrupt context. */
 void
 thread_tick (void) 
 {
+  enum intr_level old_level;
   struct thread *t = thread_current ();
+  
 
+  if (thread_mlfqs){
+     
+    t->recent_cpu=FPR_ADD_INT(t->recent_cpu,1);
+    
+  
+
+    if (timer_ticks()%TIMER_FREQ==0){
+
+      
+      old_level = intr_disable();
+
+      int nr_threads=list_size(&ready_list);
+      if (t!=idle_thread) nr_threads++;
+
+      load_avg=FPR_ADD_FPR(FPR_MUL_FPR(INT_DIV_INT(59,60),load_avg),INT_DIV_INT(nr_threads,60));
+      
+      
+      thread_foreach(update_recent_cpu,NULL);
+
+      intr_set_level(old_level);
+    }
+
+    if (timer_ticks()%4==0){
+      old_level = intr_disable();
+      thread_foreach(recalc_priorities,NULL); 
+      intr_set_level(old_level);
+
+    }
+  }
   /* Update statistics. */
   if (t == idle_thread)
     idle_ticks++;
@@ -137,6 +204,8 @@ thread_tick (void)
   /* Enforce preemption. */
   if (++thread_ticks >= TIME_SLICE)
     intr_yield_on_return ();
+
+
 }
 
 /* Prints thread statistics. */
@@ -182,6 +251,10 @@ thread_create (const char *name, int priority,
 
   /* Initialize thread. */
   init_thread (t, name, priority);
+  if (thread_mlfqs)
+    thread_recalc_priority(t);
+  
+
   tid = t->tid = allocate_tid ();
 
   /* Prepare thread for first run by initializing its stack.
@@ -208,7 +281,8 @@ thread_create (const char *name, int priority,
 
   /* Add to run queue. */
   thread_unblock (t);
-
+  thread_yield_priority();
+  
   return tid;
 }
 
@@ -322,6 +396,28 @@ thread_yield (void)
   intr_set_level (old_level);
 }
 
+/*
+current thread yields if it doesn't have the highest priority
+*/
+
+void thread_yield_priority(void){
+  struct thread *cur=thread_current();
+  struct thread *hpriority_thread = list_entry(list_max(&ready_list,is_smaller_priority,NULL),struct thread, elem);
+
+  if (cur->priority<hpriority_thread->priority)
+    thread_yield();
+}
+
+/*
+recalculates the priority of a given thread
+*/
+
+void thread_recalc_priority(struct thread * t){
+  t->priority =  FPR_TO_INT(FPR_SUB_FPR(INT_TO_FPR(PRI_MAX-t->nice*2),FPR_DIV_INT(t->recent_cpu,4)));
+  if (t->priority > PRI_MAX) t->priority = PRI_MAX;
+  if (t->priority < PRI_MIN) t->priority = PRI_MIN;
+}
+
 /* Invoke function 'func' on all threads, passing along 'aux'.
    This function must be called with interrupts off. */
 void
@@ -344,6 +440,7 @@ void
 thread_set_priority (int new_priority) 
 {
   thread_current ()->priority = new_priority;
+  thread_yield_priority();
 }
 
 /* Returns the current thread's priority. */
@@ -355,33 +452,35 @@ thread_get_priority (void)
 
 /* Sets the current thread's nice value to NICE. */
 void
-thread_set_nice (int nice UNUSED) 
+thread_set_nice (int nice) 
 {
-  /* Not yet implemented. */
+  thread_current()->nice = nice;
+  thread_recalc_priority(thread_current());
+  thread_yield_priority();
+  
 }
 
 /* Returns the current thread's nice value. */
 int
 thread_get_nice (void) 
 {
-  /* Not yet implemented. */
-  return 0;
+  return thread_current()->nice;
 }
 
 /* Returns 100 times the system load average. */
 int
 thread_get_load_avg (void) 
 {
-  /* Not yet implemented. */
-  return 0;
+  return FPR_TO_INT(FPR_MUL_INT(load_avg,100));
 }
 
 /* Returns 100 times the current thread's recent_cpu value. */
 int
 thread_get_recent_cpu (void) 
 {
-  /* Not yet implemented. */
-  return 0;
+  
+  
+  return FPR_TO_INT(FPR_MUL_INT(thread_current()->recent_cpu,100));
 }
 
 /* Idle thread.  Executes when no other thread is ready to run.
@@ -468,6 +567,10 @@ init_thread (struct thread *t, const char *name, int priority)
   strlcpy (t->name, name, sizeof t->name);
   t->stack = (uint8_t *) t + PGSIZE;
   t->priority = priority;
+  t->nice = 0;
+  t->recent_cpu= 0;
+ 
+
   t->magic = THREAD_MAGIC;
   list_push_back (&all_list, &t->allelem);
 }
@@ -495,8 +598,11 @@ next_thread_to_run (void)
 {
   if (list_empty (&ready_list))
     return idle_thread;
-  else
-    return list_entry (list_pop_front (&ready_list), struct thread, elem);
+  else{
+    struct thread *t=list_entry(list_max(&ready_list,is_smaller_priority,NULL),struct thread, elem);
+    list_remove(&(t->elem));
+    return t;
+  }
 }
 
 /* Completes a thread switch by activating the new thread's page
@@ -527,7 +633,8 @@ thread_schedule_tail (struct thread *prev)
 
   /* Start new time slice. */
   thread_ticks = 0;
-
+  
+  
 #ifdef USERPROG
   /* Activate the new address space. */
   process_activate ();
