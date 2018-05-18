@@ -19,38 +19,38 @@
 #include "threads/vaddr.h"
 
 static thread_func start_process NO_RETURN;
-static bool load (const char *cmdline, void (**eip) (void), void **esp);
+static bool load (char *command, void (**eip) (void), void **esp);
 
 /* Starts a new thread running a user program loaded from
    FILENAME.  The new thread may be scheduled (and may even exit)
    before process_execute() returns.  Returns the new process's
    thread id, or TID_ERROR if the thread cannot be created. */
 tid_t
-process_execute (const char *file_name) 
+process_execute (const char *command) 
 {
-  char *fn_copy;
+  char *cmd_copy;
   tid_t tid;
 
   /* Make a copy of FILE_NAME.
      Otherwise there's a race between the caller and load(). */
-  fn_copy = palloc_get_page (0);
-  if (fn_copy == NULL)
+  cmd_copy = palloc_get_page (0);
+  if (cmd_copy == NULL)
     return TID_ERROR;
-  strlcpy (fn_copy, file_name, PGSIZE);
+  strlcpy (cmd_copy, command, PGSIZE);
 
   /* Create a new thread to execute FILE_NAME. */
-  tid = thread_create (file_name, PRI_DEFAULT, start_process, fn_copy);
+  tid = thread_create (command, PRI_DEFAULT, start_process, cmd_copy);
   if (tid == TID_ERROR)
-    palloc_free_page (fn_copy); 
+    palloc_free_page (cmd_copy); 
   return tid;
 }
 
 /* A thread function that loads a user process and starts it
    running. */
 static void
-start_process (void *file_name_)
+start_process (void *command_)
 {
-  char *file_name = file_name_;
+  char *command = command_;
   struct intr_frame if_;
   bool success;
 
@@ -59,10 +59,10 @@ start_process (void *file_name_)
   if_.gs = if_.fs = if_.es = if_.ds = if_.ss = SEL_UDSEG;
   if_.cs = SEL_UCSEG;
   if_.eflags = FLAG_IF | FLAG_MBS;
-  success = load (file_name, &if_.eip, &if_.esp);
+  success = load (command, &if_.eip, &if_.esp);
 
   /* If load failed, quit. */
-  palloc_free_page (file_name);
+  palloc_free_page (command);
   if (!success) 
     thread_exit ();
 
@@ -86,9 +86,24 @@ start_process (void *file_name_)
    This function will be implemented in problem 2-2.  For now, it
    does nothing. */
 int
-process_wait (tid_t child_tid UNUSED) 
+process_wait (tid_t child_tid) 
 {
-  return -1;
+  enum intr_level old_level;
+  old_level = intr_disable();
+
+  struct thread * child = find_thread_by_tid(child_tid);
+  struct thread * cr_thread = thread_current();
+
+  if (child==NULL || child->parent != cr_thread 
+      || child->wstatus == PARENT_FINISHED_WAITING)
+    return -1;
+
+  child->wstatus = PARENT_WAITING;
+
+  thread_block();
+  intr_set_level (old_level);
+
+  return cr_thread->child_exit_code;
 }
 
 /* Free the current process's resources. */
@@ -97,6 +112,13 @@ process_exit (void)
 {
   struct thread *cur = thread_current ();
   uint32_t *pd;
+
+  if (cur->parent){
+    char *name,*ptr;
+    name = strtok_r(cur->name," ",&ptr);
+
+    printf("%s: exit(%d)\n",name,cur->exit_code);
+  }
 
   /* Destroy the current process's page directory and switch back
      to the kernel-only page directory. */
@@ -195,7 +217,7 @@ struct Elf32_Phdr
 #define PF_W 2          /* Writable. */
 #define PF_R 4          /* Readable. */
 
-static bool setup_stack (void **esp);
+static bool setup_stack (void **esp, char * command);
 static bool validate_segment (const struct Elf32_Phdr *, struct file *);
 static bool load_segment (struct file *file, off_t ofs, uint8_t *upage,
                           uint32_t read_bytes, uint32_t zero_bytes,
@@ -206,7 +228,7 @@ static bool load_segment (struct file *file, off_t ofs, uint8_t *upage,
    and its initial stack pointer into *ESP.
    Returns true if successful, false otherwise. */
 bool
-load (const char *file_name, void (**eip) (void), void **esp) 
+load (char *command, void (**eip) (void), void **esp) 
 {
   struct thread *t = thread_current ();
   struct Elf32_Ehdr ehdr;
@@ -214,7 +236,7 @@ load (const char *file_name, void (**eip) (void), void **esp)
   off_t file_ofs;
   bool success = false;
   int i;
-
+  char *file_name,*ptr;
   /* Allocate and activate page directory. */
   t->pagedir = pagedir_create ();
   if (t->pagedir == NULL) 
@@ -222,6 +244,13 @@ load (const char *file_name, void (**eip) (void), void **esp)
   process_activate ();
 
   /* Open executable file. */
+  file_name = strtok_r(command," ",&ptr);
+
+  if (!file_name){
+    printf("can't use empty file name\n");
+    goto done;
+  }
+
   file = filesys_open (file_name);
   if (file == NULL) 
     {
@@ -302,7 +331,10 @@ load (const char *file_name, void (**eip) (void), void **esp)
     }
 
   /* Set up stack. */
-  if (!setup_stack (esp))
+  if (*(--ptr)=='\0')
+    *ptr=' ';
+
+  if (!setup_stack (esp,command))
     goto done;
 
   /* Start address. */
@@ -424,10 +456,86 @@ load_segment (struct file *file, off_t ofs, uint8_t *upage,
   return true;
 }
 
+
+//used to check that the stack pointer doesn't go bellow the allowed page limits
+static bool pless(void *A, void *B){
+  return A<B;
+}
+
+/* push arguments on stack 
+we must ensure that the arguments can fit on the stack
+*/
+
+static bool push_arguments(void **esp, char *command){
+  char *cr,*ptr;
+  int argc = 0;
+
+  char *char_esp = PHYS_BASE;
+  void * low_limit = PHYS_BASE-PGSIZE;
+
+  cr=strtok_r(command," ",&ptr);
+  
+  while (cr){
+    int len=strlen(cr)+1;
+    
+    char_esp-=len;
+    if (pless(char_esp,low_limit)) return 0;
+
+    strlcpy(char_esp,cr,len);
+    
+    
+    argc++;
+
+    cr=strtok_r(NULL," ",&ptr);
+  }
+
+
+  //the fact that push_arguments was called, means that file_name was not null so this means
+  //there's at least 1 argument => argc>0
+
+  *esp = char_esp;
+  char ** pchar_esp = *esp;
+  pchar_esp-=argc+1;
+
+  if (pless(pchar_esp,low_limit)) return 0;
+
+  int argl = argc;
+  for (char_esp = PHYS_BASE-1; argl>0; char_esp--){
+    if (*(char_esp-1)==0){
+      *pchar_esp = char_esp;
+      
+      pchar_esp++;
+
+      argl--;
+    }
+  }
+
+  *pchar_esp=0;
+  *esp=pchar_esp-argc-1;
+
+ 
+  *esp = (char **)(*esp)-1;
+  if (pless(esp,low_limit)) return 0;
+  *(char ***)(*esp)=pchar_esp-argc;
+  
+ 
+  *esp = (int *)(*esp)-1;
+  if (pless(esp,low_limit)) return 0;
+  *(int *)(*esp) = argc;
+
+  
+  *esp=(void **)(*esp) - 1;
+  if (pless(esp,low_limit)) return 0;
+  *(void **)(*esp)=0;
+  
+
+  return 1;
+}
+
 /* Create a minimal stack by mapping a zeroed page at the top of
    user virtual memory. */
 static bool
-setup_stack (void **esp) 
+setup_stack (void **esp, char *command) 
 {
   uint8_t *kpage;
   bool success = false;
@@ -435,10 +543,12 @@ setup_stack (void **esp)
   kpage = palloc_get_page (PAL_USER | PAL_ZERO);
   if (kpage != NULL) 
     {
+
       success = install_page (((uint8_t *) PHYS_BASE) - PGSIZE, kpage, true);
       if (success)
-        *esp = PHYS_BASE;
-      else
+        success&=push_arguments(esp,command);
+
+      if (!success)
         palloc_free_page (kpage);
     }
   return success;

@@ -15,6 +15,12 @@ enum thread_status
     THREAD_DYING        /* About to be destroyed. */
   };
 
+enum waiting_status{
+  PARENT_NOT_WAITING,
+  PARENT_WAITING,
+  PARENT_FINISHED_WAITING
+};
+
 /* Thread identifier type.
    You can redefine this to whatever type you like. */
 typedef int tid_t;
@@ -95,9 +101,14 @@ struct thread
     /* Shared between thread.c and synch.c. */
     struct list_elem elem;              /* List element. */
 
+    struct thread * parent;
+    uint32_t exit_code,child_exit_code;
+    enum waiting_status wstatus;
+
 #ifdef USERPROG
     /* Owned by userprog/process.c. */
     uint32_t *pagedir;                  /* Page directory. */
+
 #endif
 
     /* Owned by thread.c. */
@@ -140,4 +151,5 @@ void thread_set_nice (int);
 int thread_get_recent_cpu (void);
 int thread_get_load_avg (void);
 
+struct thread * find_thread_by_tid(tid_t tid);
 #endif /* threads/thread.h */

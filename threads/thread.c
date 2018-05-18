@@ -124,6 +124,29 @@ thread_start (void)
 }
 
 /*
+Find a thread by a given tid
+*/
+
+
+
+struct thread * find_thread_by_tid(tid_t tid){
+  struct list_elem *e;
+
+  ASSERT (intr_get_level () == INTR_OFF);
+
+  for (e = list_begin (&all_list); e != list_end (&all_list);
+       e = list_next (e))
+    {
+      struct thread *t = list_entry (e, struct thread, allelem);
+
+      if (t->tid == tid)
+        return t;
+    }
+
+  return NULL;
+}
+
+/*
 Function to order thread by priorites
 */
 static bool is_smaller_priority(const struct list_elem *A, const struct list_elem *B, void * aux){
@@ -152,6 +175,7 @@ void recalc_priorities(struct thread *t, void *aux){
 
   thread_recalc_priority(t);
 }
+
 
 /* Called by the timer interrupt handler at each timer tick.
    Thus, this function runs in an external interrupt context. */
@@ -256,6 +280,9 @@ thread_create (const char *name, int priority,
   
 
   tid = t->tid = allocate_tid ();
+  t->parent = thread_current();
+  t->exit_code = -1;
+  t->wstatus = PARENT_NOT_WAITING;
 
   /* Prepare thread for first run by initializing its stack.
      Do this atomically so intermediate values for the 'stack' 
@@ -365,7 +392,17 @@ thread_exit (void)
   ASSERT (!intr_context ());
 
 #ifdef USERPROG
+
+  struct thread * t = thread_current();
+  
+  if (t->parent!=NULL && t->wstatus == PARENT_WAITING){
+    t->wstatus = PARENT_FINISHED_WAITING;
+    t->child_exit_code = t->exit_code;
+    thread_unblock(t->parent);
+  }
+
   process_exit ();
+
 #endif
 
   /* Remove thread from all threads list, set our status to dying,
@@ -570,6 +607,9 @@ init_thread (struct thread *t, const char *name, int priority)
   t->nice = 0;
   t->recent_cpu= 0;
  
+  t->parent = 0;
+  t->exit_code = 0;
+  t->wstatus = PARENT_NOT_WAITING;
 
   t->magic = THREAD_MAGIC;
   list_push_back (&all_list, &t->allelem);
