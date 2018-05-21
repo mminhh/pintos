@@ -39,6 +39,11 @@ static struct thread *initial_thread;
 /* Lock used by allocate_tid(). */
 static struct lock tid_lock;
 
+/* List to hold thread statuses for threads that have finished and are waiting for the process to call "wait"*/
+static struct list fchilds;
+
+extern struct semaphore exec_lock;
+
 /* Stack frame for kernel_thread(). */
 struct kernel_thread_frame 
   {
@@ -96,6 +101,7 @@ thread_init (void)
   lock_init (&tid_lock);
   list_init (&ready_list);
   list_init (&all_list);
+  list_init (&fchilds);
 
   load_avg=0;
 
@@ -146,6 +152,27 @@ struct thread * find_thread_by_tid(tid_t tid){
   return NULL;
 }
 
+int find_exit_code_by_tid(tid_t parent_tid, tid_t child_tid){
+  struct list_elem *e;
+
+  ASSERT (intr_get_level () == INTR_OFF);
+
+  for (e = list_begin (&fchilds); e != list_end (&fchilds);
+       e = list_next (e))
+    {
+      struct fchild *fchild = list_entry (e, struct fchild, elem);
+
+      if (fchild->tid == child_tid && fchild->parent_tid == parent_tid){
+        int exit_code = fchild->exit_code;
+        list_remove(e);
+        palloc_free_page(fchild);
+
+        return exit_code;
+      }
+    }
+
+  return -1;
+}
 /*
 Function to order thread by priorites
 */
@@ -282,7 +309,6 @@ thread_create (const char *name, int priority,
   tid = t->tid = allocate_tid ();
   t->parent = thread_current();
   t->exit_code = -1;
-  t->wstatus = PARENT_NOT_WAITING;
 
   /* Prepare thread for first run by initializing its stack.
      Do this atomically so intermediate values for the 'stack' 
@@ -392,17 +418,7 @@ thread_exit (void)
   ASSERT (!intr_context ());
 
 #ifdef USERPROG
-
-  struct thread * t = thread_current();
-  
-  if (t->parent!=NULL && t->wstatus == PARENT_WAITING){
-    t->wstatus = PARENT_FINISHED_WAITING;
-    t->child_exit_code = t->exit_code;
-    thread_unblock(t->parent);
-  }
-
   process_exit ();
-
 #endif
 
   /* Remove thread from all threads list, set our status to dying,
@@ -410,6 +426,26 @@ thread_exit (void)
      when it calls thread_schedule_tail(). */
   intr_disable ();
   list_remove (&thread_current()->allelem);
+
+#ifdef USERPROG
+
+  struct thread * t = thread_current();
+  
+  struct fchild *tstatus = palloc_get_page(PAL_ZERO);
+  tstatus->tid = t->tid;
+  tstatus->exit_code = t->exit_code;
+
+  if (t->parent)
+    tstatus->parent_tid = t->parent->tid;
+  else 
+    tstatus->parent_tid = -1;
+
+  list_push_back(&fchilds,&(tstatus->elem));
+
+  if (t->pwaiting)
+    thread_unblock(t->parent);
+
+#endif
   thread_current ()->status = THREAD_DYING;
   schedule ();
   NOT_REACHED ();
@@ -609,7 +645,8 @@ init_thread (struct thread *t, const char *name, int priority)
  
   t->parent = 0;
   t->exit_code = 0;
-  t->wstatus = PARENT_NOT_WAITING;
+  t->pwaiting = 0;
+ 
 
   t->magic = THREAD_MAGIC;
   list_push_back (&all_list, &t->allelem);

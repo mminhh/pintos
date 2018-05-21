@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <list.h>
 #include "userprog/gdt.h"
 #include "userprog/pagedir.h"
 #include "userprog/tss.h"
@@ -21,6 +22,13 @@
 static thread_func start_process NO_RETURN;
 static bool load (char *command, void (**eip) (void), void **esp);
 
+// struct holds necessary variables such that the parent and the child process can communicate
+struct execution_info{
+  char *command;
+  bool success;
+  struct semaphore success_sema;
+};
+
 /* Starts a new thread running a user program loaded from
    FILENAME.  The new thread may be scheduled (and may even exit)
    before process_execute() returns.  Returns the new process's
@@ -28,6 +36,7 @@ static bool load (char *command, void (**eip) (void), void **esp);
 tid_t
 process_execute (const char *command) 
 {
+  
   char *cmd_copy;
   tid_t tid;
 
@@ -39,20 +48,37 @@ process_execute (const char *command)
   strlcpy (cmd_copy, command, PGSIZE);
 
   /* Create a new thread to execute FILE_NAME. */
-  tid = thread_create (command, PRI_DEFAULT, start_process, cmd_copy);
+  
+  struct execution_info exec_info = {
+    .command = cmd_copy,
+    .success = 0,
+  };
+  sema_init(&exec_info.success_sema,0);
+
+  tid = thread_create (command, PRI_DEFAULT, start_process, &exec_info);
+  sema_down(&exec_info.success_sema);
+
   if (tid == TID_ERROR)
     palloc_free_page (cmd_copy); 
+
+  if (!exec_info.success){
+    process_wait(tid);
+    tid = TID_ERROR;
+  }
+
   return tid;
 }
 
 /* A thread function that loads a user process and starts it
    running. */
 static void
-start_process (void *command_)
+start_process (void *exec_info_)
 {
-  char *command = command_;
+  struct execution_info* exec_info = exec_info_;
+
+  char *command = exec_info->command;
   struct intr_frame if_;
-  bool success;
+  bool success = 0;
 
   /* Initialize interrupt frame and load executable. */
   memset (&if_, 0, sizeof if_);
@@ -60,6 +86,9 @@ start_process (void *command_)
   if_.cs = SEL_UCSEG;
   if_.eflags = FLAG_IF | FLAG_MBS;
   success = load (command, &if_.eip, &if_.esp);
+
+  exec_info->success = success;
+  sema_up(&(exec_info->success_sema));
 
   /* If load failed, quit. */
   palloc_free_page (command);
@@ -76,6 +105,7 @@ start_process (void *command_)
   NOT_REACHED ();
 }
 
+
 /* Waits for thread TID to die and returns its exit status.  If
    it was terminated by the kernel (i.e. killed due to an
    exception), returns -1.  If TID is invalid or if it was not a
@@ -85,25 +115,34 @@ start_process (void *command_)
 
    This function will be implemented in problem 2-2.  For now, it
    does nothing. */
+
+
 int
 process_wait (tid_t child_tid) 
-{
+{ 
+
   enum intr_level old_level;
   old_level = intr_disable();
 
   struct thread * child = find_thread_by_tid(child_tid);
   struct thread * cr_thread = thread_current();
 
-  if (child==NULL || child->parent != cr_thread 
-      || child->wstatus == PARENT_FINISHED_WAITING)
-    return -1;
+  int exit_code = -1;
+  if (child==NULL){
+    exit_code = find_exit_code_by_tid(cr_thread->tid,child_tid);
+  }
+  else if (child->parent != cr_thread)
+    exit_code = -1;
+  else{
 
-  child->wstatus = PARENT_WAITING;
+    
+    child->pwaiting = 1;
+    thread_block();
+    exit_code = find_exit_code_by_tid(cr_thread->tid, child_tid);
+  }
 
-  thread_block();
-  intr_set_level (old_level);
-
-  return cr_thread->child_exit_code;
+  intr_set_level(old_level);
+  return exit_code;
 }
 
 /* Free the current process's resources. */

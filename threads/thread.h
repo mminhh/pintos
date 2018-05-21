@@ -6,6 +6,7 @@
 #include <stdint.h>
 #include "threads/fpr_arith.h"
 
+
 /* States in a thread's life cycle. */
 enum thread_status
   {
@@ -15,11 +16,7 @@ enum thread_status
     THREAD_DYING        /* About to be destroyed. */
   };
 
-enum waiting_status{
-  PARENT_NOT_WAITING,
-  PARENT_WAITING,
-  PARENT_FINISHED_WAITING
-};
+
 
 /* Thread identifier type.
    You can redefine this to whatever type you like. */
@@ -100,10 +97,12 @@ struct thread
     FPReal recent_cpu;                     /* recent CPU used by the thread */
     /* Shared between thread.c and synch.c. */
     struct list_elem elem;              /* List element. */
+    
+
 
     struct thread * parent;
-    uint32_t exit_code,child_exit_code;
-    enum waiting_status wstatus;
+    uint32_t exit_code;
+    bool pwaiting;
 
 #ifdef USERPROG
     /* Owned by userprog/process.c. */
@@ -114,6 +113,14 @@ struct thread
     /* Owned by thread.c. */
     unsigned magic;                     /* Detects stack overflow. */
   };
+
+struct fchild{
+  tid_t tid,parent_tid;
+  uint32_t exit_code;
+  struct list_elem elem;
+};
+
+
 
 /* If false (default), use round-robin scheduler.
    If true, use multi-level feedback queue scheduler.
@@ -152,4 +159,5 @@ int thread_get_recent_cpu (void);
 int thread_get_load_avg (void);
 
 struct thread * find_thread_by_tid(tid_t tid);
+int find_exit_code_by_tid(tid_t parent_tid, tid_t child_tid);
 #endif /* threads/thread.h */
