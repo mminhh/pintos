@@ -4,6 +4,8 @@
 #include <debug.h>
 #include <list.h>
 #include <stdint.h>
+#include <hash.h>
+#include "filesys/filesys.h"
 #include "threads/fpr_arith.h"
 
 
@@ -21,6 +23,8 @@ enum thread_status
 /* Thread identifier type.
    You can redefine this to whatever type you like. */
 typedef int tid_t;
+typedef int fd_t;
+
 #define TID_ERROR ((tid_t) -1)          /* Error value for tid_t. */
 
 /* Thread priorities. */
@@ -98,7 +102,8 @@ struct thread
     /* Shared between thread.c and synch.c. */
     struct list_elem elem;              /* List element. */
     
-
+    fd_t next_fd;
+    struct hash file_table;
 
     struct thread * parent;
     uint32_t exit_code;
@@ -120,6 +125,12 @@ struct fchild{
   struct list_elem elem;
 };
 
+
+struct ftable_entry{
+  fd_t fd;
+  struct file* file;
+  struct hash_elem elem;
+};
 
 
 /* If false (default), use round-robin scheduler.
@@ -160,4 +171,9 @@ int thread_get_load_avg (void);
 
 struct thread * find_thread_by_tid(tid_t tid);
 int find_exit_code_by_tid(tid_t parent_tid, tid_t child_tid);
+
+fd_t add_file(struct file *);
+struct file * get_file_by_fd(fd_t);
+bool remove_file(fd_t);
+
 #endif /* threads/thread.h */

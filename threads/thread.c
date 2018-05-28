@@ -12,6 +12,7 @@
 #include "threads/synch.h"
 #include "threads/vaddr.h"
 #include "devices/timer.h"
+#include "filesys/file.h"
 
 #ifdef USERPROG
 #include "userprog/process.h"
@@ -79,6 +80,10 @@ static void *alloc_frame (struct thread *, size_t size);
 static void schedule (void);
 void thread_schedule_tail (struct thread *prev);
 static tid_t allocate_tid (void);
+static fd_t allocate_fd(void);
+static unsigned ftable_entry_hash(const struct hash_elem *, void *);
+static bool ftable_entry_compare(const struct hash_elem *, const struct hash_elem *, void *);
+static void close_all_files(struct thread*);
 
 /* Initializes the threading system by transforming the code
    that's currently running into a thread.  This can't work in
@@ -309,6 +314,7 @@ thread_create (const char *name, int priority,
   tid = t->tid = allocate_tid ();
   t->parent = thread_current();
   t->exit_code = -1;
+  hash_init(&t->file_table, ftable_entry_hash, ftable_entry_compare, NULL);
 
   /* Prepare thread for first run by initializing its stack.
      Do this atomically so intermediate values for the 'stack' 
@@ -434,7 +440,8 @@ thread_exit (void)
   struct fchild *tstatus = palloc_get_page(PAL_ZERO);
   tstatus->tid = t->tid;
   tstatus->exit_code = t->exit_code;
-
+  close_all_files(t);
+  
   if (t->parent)
     tstatus->parent_tid = t->parent->tid;
   else 
@@ -646,7 +653,7 @@ init_thread (struct thread *t, const char *name, int priority)
   t->parent = 0;
   t->exit_code = 0;
   t->pwaiting = 0;
- 
+  t->next_fd = 2;
 
   t->magic = THREAD_MAGIC;
   list_push_back (&all_list, &t->allelem);
@@ -752,6 +759,7 @@ schedule (void)
   thread_schedule_tail (prev);
 }
 
+
 /* Returns a tid to use for a new thread. */
 static tid_t
 allocate_tid (void) 
@@ -764,6 +772,70 @@ allocate_tid (void)
   lock_release (&tid_lock);
 
   return tid;
+}
+
+fd_t allocate_fd(){
+  return thread_current()->next_fd++;
+}
+
+static unsigned ftable_entry_hash(const struct hash_elem * e, void * aux){
+  struct ftable_entry * entry = hash_entry(e, struct ftable_entry, elem);
+  return hash_int(entry->fd);
+}
+
+static bool ftable_entry_compare(const struct hash_elem * a, const struct hash_elem *b, void * aux){
+  struct ftable_entry * entry_a = hash_entry(a, struct ftable_entry, elem);
+  struct ftable_entry * entry_b = hash_entry(b, struct ftable_entry, elem);
+
+  return entry_a->fd < entry_b->fd;
+}
+
+fd_t add_file(struct file * f){
+  struct ftable_entry * entry = palloc_get_page(PAL_ZERO);
+  entry->fd = allocate_fd();
+  entry->file = f;
+  hash_insert(&thread_current()->file_table,&entry->elem);
+
+  return entry->fd;
+}
+
+struct file * get_file_by_fd(fd_t fd){
+  struct ftable_entry entry;
+  entry.fd = fd;
+
+ 
+  struct hash_elem * e = hash_find(&thread_current()->file_table,&entry.elem);
+
+  if (e==NULL){
+
+    return NULL;
+  }
+
+  return hash_entry(e,struct ftable_entry, elem)->file;
+}
+
+bool remove_file(fd_t fd){
+  struct ftable_entry entry;
+  entry.fd = fd;
+
+  struct hash_elem * e = hash_find(&thread_current()->file_table,&entry.elem);
+
+  if (e==NULL)
+    return 0;
+
+  hash_delete(&thread_current()->file_table,e);
+  palloc_free_page(hash_entry(e,struct ftable_entry, elem));
+  return 1;
+}
+
+void close_file(struct hash_elem* e, void *aux){
+  struct ftable_entry * entry = hash_entry(e,struct ftable_entry, elem);
+  file_close(entry->file);
+  palloc_free_page(entry);
+}
+
+static void close_all_files(struct thread * t){
+  hash_destroy(&t->file_table,close_file);
 }
 
 /* Offset of `stack' member within `struct thread'.
